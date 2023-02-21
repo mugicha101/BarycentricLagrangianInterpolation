@@ -10,6 +10,10 @@ FetchContent_MakeAvailable(SFML)
 add_executable(CMakeSFMLProject src/main.cpp)
 target_link_libraries(CMakeSFMLProject PRIVATE sfml-graphics)
 target_compile_features(CMakeSFMLProject PRIVATE cxx_std_17)
+# add_custom_command(TARGET CMakeSFMLProject PRE_BUILD
+        # COMMAND ${CMAKE_COMMAND} -E copy_directory
+        # ${CMAKE_SOURCE_DIR}/src/resources/bad_apple_pngs $<TARGET_FILE_DIR:CMakeSFMLProject>/resources/bad_apple_pngs)
+add_compile_definitions(_USE_MATH_DEFINES)
 if (WIN32 AND BUILD_SHARED_LIBS)
     add_custom_command(TARGET CMakeSFMLProject POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_RUNTIME_DLLS:CMakeSFMLProject> $<TARGET_FILE_DIR:CMakeSFMLProject> COMMAND_EXPAND_LISTS)
