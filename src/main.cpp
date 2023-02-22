@@ -7,8 +7,8 @@
 #include <map>
 #include <set>
 #include <complex>
+#include <filesystem>
 #define CNum complex<double>
-#define SINGLE_POLYNOMIAL false
 
 /* CMAKE COMMANDS:
  * cmake -S . -B build
@@ -17,8 +17,10 @@
 const int IMG_HEIGHT = 720;
 const int IMG_WIDTH = 960;
 const int IMG_SIZE = IMG_WIDTH * IMG_HEIGHT;
-const int MIN_ISLAND_SIZE = 10;
-const int SAMPLE_SPACING = 10;
+const int MIN_SAMPLE_POINTS = 4;
+const int SAMPLE_SPACING = 20;
+const int EVAL_SPACING = 1;
+const int BG_OPACITY = 0; // 0 = invisible, 255 = solid
 using namespace std;
 
 struct Frame {
@@ -69,12 +71,10 @@ struct Polygon {
     // create polygon from edge points
     explicit Polygon(vector<pair<int,int>> edgePoints) : points(move(edgePoints)) {
         points.push_back(points[0]);
-
-        // TODO: Have Polygon's start point be as close to center of mass to prevent wobbles
     }
 
     // get point p proportional along polygon, p in [0, 1]
-    pair<double,double> getPoint(double p) {
+    [[nodiscard]] pair<double,double> getPoint(double p) const {
         if (p >= 1 || p <= 0)
             return make_pair((double)points.front().first, (double)points.front().second);
         p *= (points.size() - 1);
@@ -110,20 +110,21 @@ vector<Polygon> createIslandPolygons(sf::Image& img) {
             vector<pair<int,int>> path;
             path.emplace_back(x, y);
             const pair<int,int> offsets[] = {{0,1}, {1,1}, {1,0}, {1,-1}, {0,-1}, {-1,-1}, {-1,0}, {-1,1}};
-            int dir = 0;
+            int dir = 2;
             int px = x;
             int py = y;
             set<long long> edges;
             while (true) {
-                // try all 8 directions
+                // try all 8 directions (7 if origin point to prevent reversal)
                 bool searching = true;
-                for (int i = 0; i < 8 && searching; ++i) {
+                int dirCount = 8 - (px == x && py == y);
+                for (int i = 0; i < dirCount && searching; ++i) {
                     dir = (dir + 1) & 0b111;
                     int qx = px + offsets[dir].first;
                     int qy = py + offsets[dir].second;
                     if (qx < 0 || qy < 0 || qx >= IMG_WIDTH || qy >= IMG_HEIGHT)
                         continue;
-                    if (visited[qy][qx])
+                    if (visited[qy][qx] & 0b11)
                         continue;
                     if (!isEdgePoint(qx, qy))
                         continue;
@@ -140,29 +141,94 @@ vector<Polygon> createIslandPolygons(sf::Image& img) {
                     break;
                 dir = (dir + 4) & 0b111;
             }
-            printf("PATH %d size=%d\n", (int)islandPolygons.size() + 1, path.size());
-            for (auto& p : path)
-                visited[p.second][p.first] |= 2;
+            if (path.back().first != path.front().first && path.back().second != path.front().second) {
+                path.push_back(path.front());
+            }
+            for (auto& p : path) {
+                visited[p.second][p.first] |= 0b10;
+            }
             islandPolygons.emplace_back(move(path));
         }
     }
     return islandPolygons;
 }
 
+struct drawPolygonArgs {
+
+};
+
+sf::Mutex mutex;
+
+void drawPolygon(sf::RenderTexture& renderTexture, const Polygon& poly, const sf::Color color) {
+    // get sample points from polygon
+    int samplePoints = (int)poly.points.size() / SAMPLE_SPACING;
+    vector<double> xVec;
+    xVec.reserve(samplePoints);
+    for (int i = 0; i < samplePoints; ++i)
+        xVec.push_back(((double) i / (samplePoints - 1)) * 2 - 1);
+    vector<CNum> yVec;
+    yVec.reserve(xVec.size());
+    for (double& x : xVec) {
+        pair<double, double> point = poly.getPoint(x * 0.5 + 0.5);
+        yVec.emplace_back(point.first, point.second);
+    }
+
+    // evaluate barycentric lagrangian interpolated polynomial
+    int evalPoints = max(3, (int)poly.points.size() / EVAL_SPACING);
+    vector<double> evalVec = BLI::chebyshev2(evalPoints-1);
+    vector<CNum> evalRes;
+    evalRes.reserve(evalVec.size());
+    for (double x : evalVec)
+        evalRes.push_back(BLI::eval(yVec, x));
+
+    // render points
+    sf::CircleShape circle;
+    circle.setRadius(2.f);
+    circle.setOrigin(circle.getRadius(), circle.getRadius());
+    circle.setFillColor(color);
+    for (const CNum& point : evalRes) {
+        circle.setPosition((float) point.real(), (float) point.imag());
+        renderTexture.draw(circle);
+    }
+    circle.setRadius(4.f);
+    circle.setOrigin(circle.getRadius(), circle.getRadius());
+    for (const CNum& point : yVec) {
+        circle.setPosition((float)point.real(), (float)point.imag());
+        renderTexture.draw(circle);
+    }
+}
+
+string createFrameId(int id) {
+    string idStr;
+    for (int j = 0; j < 5; ++j) {
+        idStr.push_back((char)('0' + id % 10));
+        id /= 10;
+    }
+    reverse(idStr.begin(), idStr.end());
+    return idStr;
+}
+
 void playVideo()
 {
-    auto window = sf::RenderWindow{ { 1920u, 1080u }, "CMake SFML Project" };
+    sf::RenderWindow window = sf::RenderWindow{ {  IMG_WIDTH, IMG_HEIGHT }, "CMake SFML Project" };
     window.setFramerateLimit(30);
+    sf::RenderTexture videoTexture;
+    videoTexture.create(IMG_WIDTH, IMG_HEIGHT);
+    sf::RenderTexture polyTexture;
+    polyTexture.create(IMG_WIDTH, IMG_HEIGHT);
+    sf::RenderTexture outputTexture;
+    outputTexture.create(IMG_WIDTH, IMG_HEIGHT);
     const int FRAMES = 6572;
     const int BUFFER_SIZE = 20;
     deque<Frame> frameBuffer;
     int bufferedFrames = 0;
     int frameCount = 0;
-    sf::Sprite screen;
-    sf::Image screenImage;
     cout << "START\n";
     bool paused = false;
     bool showOriginal = true;
+    bool coloredPolynomials = true;
+    filesystem::remove_all("video_output");
+    filesystem::create_directory("video_output");
 
     while (window.isOpen())
     {
@@ -173,10 +239,19 @@ void playVideo()
             }
 
             if (event.type == sf::Event::KeyPressed) {
-                if (event.key.code == sf::Keyboard::Key::Escape)
-                    paused = !paused;
-                if (event.key.code == sf::Keyboard::Key::B)
-                    showOriginal = !showOriginal;
+                switch (event.key.code) {
+                    case (sf::Keyboard::Key::Escape):
+                        paused = !paused;
+                        break;
+                    case (sf::Keyboard::Key::B):
+                        showOriginal = !showOriginal;
+                        break;
+                    case (sf::Keyboard::Key::C):
+                        coloredPolynomials = !coloredPolynomials;
+                        break;
+                    default:
+                        break;
+                }
             }
         }
         if (paused)
@@ -185,13 +260,7 @@ void playVideo()
         // handle frame buffer
         while (bufferedFrames < frameCount + BUFFER_SIZE && bufferedFrames < FRAMES) {
             ++bufferedFrames;
-            string idStr;
-            int id = bufferedFrames;
-            for (int j = 0; j < 5; ++j) {
-                idStr.push_back((char)('0' + id % 10));
-                id /= 10;
-            }
-            reverse(idStr.begin(), idStr.end());
+            string idStr = createFrameId(bufferedFrames);
             frameBuffer.emplace_back("resources/bad_apple_pngs/" + idStr + ".png");
             printf("load %d\n", bufferedFrames);
         }
@@ -203,10 +272,10 @@ void playVideo()
             // display source screen
             printf("frame %d\n", frameCount);
             Frame& frame = frameBuffer.front();
-            if (showOriginal) {
-                screen.setTexture(frameBuffer.front().texture);
-                window.draw(screen);
-            }
+            videoTexture.draw(sf::Sprite(frameBuffer.front().texture));
+            videoTexture.display();
+            if (showOriginal)
+                window.draw(sf::Sprite(videoTexture.getTexture()));
 
             // generate dest screen
             printf("Generating Polygons\n");
@@ -214,52 +283,40 @@ void playVideo()
             printf("Displaying Polygons\n");
             sf::CircleShape circle(2.f);
             circle.setPointCount(5);
-            /*
-            circle.setFillColor(sf::Color::Blue);
-            for (Polygon& poly : islandPolygons) {
-                for (auto &p: poly.points) {
-                    circle.setPosition(p.first, p.second);
-                    window.draw(circle);
-                }
-            }
-             */
+            const sf::Color drawColors[] = {
+                    sf::Color(255,0,0),
+                    sf::Color(255,127,0),
+                    sf::Color(0,255,0),
+                    sf::Color(0,127,255),
+                    sf::Color(0,0,255),
+                    sf::Color(127,0,255),
+            };
+            printf("Drawing Barycentric Lagrangian Interpolation Curves");
+            polyTexture.clear(sf::Color::Transparent);
             int pid = 0;
-            const sf::Color drawColors[] = { sf::Color::Red, sf::Color::Yellow, sf::Color::Green, sf::Color::Cyan, sf::Color::Blue, sf::Color::Magenta };
-            vector<pair<int,int>> completePath;
-#if SINGLE_POLYNOMIAL
-            if (!islandPolygons.empty()) {
-                for (Polygon &poly: islandPolygons)
-                    for (auto &p: poly.points)
-                        completePath.emplace_back(p);
-                Polygon completePoly(completePath);
-                islandPolygons.clear();
-                islandPolygons.push_back(completePoly);
-            }
-#endif
-
             for (Polygon& poly : islandPolygons) {
-                if (poly.points.size() < MIN_ISLAND_SIZE)
+                if ((int)poly.points.size() / SAMPLE_SPACING < MIN_SAMPLE_POINTS)
                     continue;
-                int sample_points = max(3, (int)poly.points.size() / SAMPLE_SPACING);
-                vector<double> xVec = BLI::chebyshev2(sample_points);
-                vector<CNum> yVec;
-                yVec.reserve(xVec.size());
-                circle.setFillColor(drawColors[pid % 6]);
-                for (double& x : xVec) {
-                    pair<double, double> point = poly.getPoint(x * 0.5 + 0.5);
-                    yVec.emplace_back(point.first, point.second);
-                    circle.setPosition((float)point.first, (float)point.second);
-                    window.draw(circle);
-                }
-                int eval_points = max(3, (int)poly.points.size() * 2);
-                for (int i = 0; i < eval_points; ++i) {
-                    double x = (double) i * 2 / eval_points - 1;
-                    CNum point = BLI::eval(yVec, x);
-                    circle.setPosition((float)point.real(), (float)point.imag());
-                    window.draw(circle);
-                }
+                drawPolygon(polyTexture, poly, coloredPolynomials ? drawColors[pid % 6] : sf::Color::Black);
                 ++pid;
             }
+            polyTexture.display();
+            sf::Sprite sprite(polyTexture.getTexture());
+            window.draw(sprite);
+
+            // save output image
+            if (BG_OPACITY > 0) {
+                outputTexture.draw(sf::Sprite(videoTexture.getTexture()));
+                sf::RectangleShape fade;
+                fade.setSize(sf::Vector2f{IMG_WIDTH, IMG_HEIGHT});
+                fade.setFillColor(sf::Color(255, 255, 255, 255 - BG_OPACITY));
+                outputTexture.draw(fade);
+            } else {
+                outputTexture.clear(sf::Color::White);
+            }
+            outputTexture.draw(sf::Sprite(polyTexture.getTexture()));
+            outputTexture.display();
+            outputTexture.getTexture().copyToImage().saveToFile("video_output/" + createFrameId(frameCount + 1) + ".png");
 
             // pop frame
             frameBuffer.pop_front();
