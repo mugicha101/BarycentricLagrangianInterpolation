@@ -21,6 +21,9 @@ const int MIN_SAMPLE_POINTS = 4;
 const int SAMPLE_SPACING = 20;
 const int EVAL_SPACING = 1;
 const int BG_OPACITY = 0; // 0 = invisible, 255 = solid
+const int UPSCALE = 1; // will increase output size by 2^UPSCALE
+float scale = 1 << UPSCALE;
+float invScale = 1.f / (1 << UPSCALE);
 using namespace std;
 
 struct Frame {
@@ -183,17 +186,17 @@ void drawPolygon(sf::RenderTexture& renderTexture, const Polygon& poly, const sf
 
     // render points
     sf::CircleShape circle;
-    circle.setRadius(2.f);
+    circle.setRadius(2.f * scale);
     circle.setOrigin(circle.getRadius(), circle.getRadius());
     circle.setFillColor(color);
     for (const CNum& point : evalRes) {
-        circle.setPosition((float) point.real(), (float) point.imag());
+        circle.setPosition((float) point.real() * scale, (float) point.imag() * scale);
         renderTexture.draw(circle);
     }
-    circle.setRadius(4.f);
+    circle.setRadius(4.f * scale);
     circle.setOrigin(circle.getRadius(), circle.getRadius());
     for (const CNum& point : yVec) {
-        circle.setPosition((float)point.real(), (float)point.imag());
+        circle.setPosition((float)point.real() * scale, (float)point.imag() * scale);
         renderTexture.draw(circle);
     }
 }
@@ -208,16 +211,16 @@ string createFrameId(int id) {
     return idStr;
 }
 
-void playVideo()
+void playVideo(bool exportVideo = false)
 {
     sf::RenderWindow window = sf::RenderWindow{ {  IMG_WIDTH, IMG_HEIGHT }, "CMake SFML Project" };
     window.setFramerateLimit(30);
     sf::RenderTexture videoTexture;
     videoTexture.create(IMG_WIDTH, IMG_HEIGHT);
     sf::RenderTexture polyTexture;
-    polyTexture.create(IMG_WIDTH, IMG_HEIGHT);
+    polyTexture.create(IMG_WIDTH << UPSCALE, IMG_HEIGHT << UPSCALE);
     sf::RenderTexture outputTexture;
-    outputTexture.create(IMG_WIDTH, IMG_HEIGHT);
+    outputTexture.create(IMG_WIDTH << UPSCALE, IMG_HEIGHT << UPSCALE);
     const int FRAMES = 6572;
     const int BUFFER_SIZE = 20;
     deque<Frame> frameBuffer;
@@ -227,8 +230,10 @@ void playVideo()
     bool paused = false;
     bool showOriginal = true;
     bool coloredPolynomials = true;
-    filesystem::remove_all("video_output");
-    filesystem::create_directory("video_output");
+    if (exportVideo) {
+        filesystem::remove_all("video_output");
+        filesystem::create_directory("video_output");
+    }
 
     while (window.isOpen())
     {
@@ -302,21 +307,25 @@ void playVideo()
             }
             polyTexture.display();
             sf::Sprite sprite(polyTexture.getTexture());
+            sprite.setScale(invScale, invScale);
             window.draw(sprite);
 
             // save output image
-            if (BG_OPACITY > 0) {
-                outputTexture.draw(sf::Sprite(videoTexture.getTexture()));
-                sf::RectangleShape fade;
-                fade.setSize(sf::Vector2f{IMG_WIDTH, IMG_HEIGHT});
-                fade.setFillColor(sf::Color(255, 255, 255, 255 - BG_OPACITY));
-                outputTexture.draw(fade);
-            } else {
-                outputTexture.clear(sf::Color::White);
+            if (exportVideo) {
+                if (BG_OPACITY > 0) {
+                    outputTexture.draw(sf::Sprite(videoTexture.getTexture()));
+                    sf::RectangleShape fade;
+                    fade.setSize(sf::Vector2f{IMG_WIDTH << UPSCALE, IMG_HEIGHT << UPSCALE});
+                    fade.setFillColor(sf::Color(255, 255, 255, 255 - BG_OPACITY));
+                    outputTexture.draw(fade);
+                } else {
+                    outputTexture.clear(sf::Color::White);
+                }
+                outputTexture.draw(sf::Sprite(polyTexture.getTexture()));
+                outputTexture.display();
+                outputTexture.getTexture().copyToImage().saveToFile(
+                        "video_output/" + createFrameId(frameCount + 1) + ".png");
             }
-            outputTexture.draw(sf::Sprite(polyTexture.getTexture()));
-            outputTexture.display();
-            outputTexture.getTexture().copyToImage().saveToFile("video_output/" + createFrameId(frameCount + 1) + ".png");
 
             // pop frame
             frameBuffer.pop_front();
@@ -329,6 +338,6 @@ void playVideo()
 }
 
 int main() {
-    playVideo();
+    playVideo(false);
     return 0;
 }
